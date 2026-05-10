@@ -193,8 +193,24 @@ The MCP server includes beat-timed performance helpers:
 - `stop_arrangement_recording(stop_transport)`
 - `perform_clip_sequence(events, record, realtime)`
 - `perform_scene_sequence(sequence, record, realtime)`
+- `preview_scene_arrangement_spec(spec)`
+- `execute_scene_arrangement_spec(spec, dry_run)`
+- `list_arrangement_presets()`
+- `parse_arrangement_dsl(dsl, verbosity='compact')`
+- `save_arrangement_plan(slot, spec)`
+- `load_arrangement_plan(slot, verbosity='compact')`
+- `patch_arrangement_plan(slot, patch, verbosity='compact')`
+- `compose_arrangement(goal_prompt, dsl?, slot='current', mode='preview|execute', verbosity='compact')`
 
 These tools are intended to perform Session View clips/scenes into Arrangement View. Real recording requires the updated Ableton Remote Script to be loaded in Live. Use `realtime=false` only for dry-run dispatch tests.
+
+Recommended workflow for agents and skills:
+
+1. Generate a compact DSL string like `style=ukg; bpm=138; template=club44; scenes=A,B,C,D; kit=909a; bass=reese2`.
+2. Convert it with `parse_arrangement_dsl` and save to a slot with `save_arrangement_plan`.
+3. Apply small updates with `patch_arrangement_plan` (e.g. `section[2].bars=8`, `swap scene A->C`) instead of resending full JSON.
+4. Validate with `preview_scene_arrangement_spec`, then run `execute_scene_arrangement_spec`.
+5. For one-shot flow, use `compose_arrangement` and keep `verbosity='compact'` for token-efficient responses.
 
 ### Development And Tests
 

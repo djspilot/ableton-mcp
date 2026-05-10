@@ -9,6 +9,7 @@ import socket
 import json
 import logging
 import os
+import re
 import functools
 import threading
 import time
@@ -21,7 +22,16 @@ from MCP_Server.music import (
     make_notes,
     vary_notes,
 )
-from MCP_Server.arrangement import execute_timed_events, scene_sequence_to_events
+from MCP_Server.arrangement import (
+    apply_spec_patch,
+    arrangement_presets,
+    compact_plan,
+    compile_scene_arrangement_spec,
+    execute_timed_events,
+    parse_patch_text,
+    scene_sequence_to_events,
+    spec_from_dsl,
+)
 from MCP_Server.protocol import command_message, decode_message
 from MCP_Server.recipes import STYLE_RECIPES as SHARED_STYLE_RECIPES, recipe_summary
 
@@ -217,6 +227,33 @@ def _safe_json_resource(fetcher):
         return _j({"error": str(e)})
 
 
+def _compact_view(payload: Dict[str, Any], verbosity: str = "full") -> Dict[str, Any]:
+    if verbosity == "compact":
+        plan = payload.get("plan")
+        compact = dict(payload)
+        if isinstance(plan, dict):
+            compact["plan"] = compact_plan(plan)
+        if "events" in compact and isinstance(compact["events"], list):
+            compact["event_count"] = len(compact["events"])
+            del compact["events"]
+        return compact
+    return payload
+
+
+def _plan_store_load() -> Dict[str, Any]:
+    memory = _memory_load()
+    plans = memory.get("arrangement_plans")
+    if not isinstance(plans, dict):
+        return {}
+    return plans
+
+
+def _plan_store_save(plans: Dict[str, Any]) -> None:
+    memory = _memory_load()
+    memory["arrangement_plans"] = plans
+    _memory_save(memory)
+
+
 # ---------------------------------------------------------------------------
 # Resources expose current Live state as context without asking the model to
 # choose an action-oriented tool.
@@ -310,10 +347,32 @@ def make_clip_variation(track_index: int, source_clip: int, destination_clip: in
 def record_arrangement_plan(style: str = "current set", sections: str = "intro, verse, build, drop, outro") -> str:
     return (
         "Plan an Ableton arrangement recording for %s with sections: %s. First read "
-        "ableton://tracks, ableton://scenes, and ableton://transport. Build a beat-timed "
-        "clip or scene sequence, avoid stop_all_clips unless explicitly requested, then use "
-        "start_arrangement_recording plus perform_clip_sequence or perform_scene_sequence."
+        "ableton://tracks, ableton://scenes, and ableton://transport. Build a declarative "
+        "scene arrangement spec, run preview_scene_arrangement_spec first, then run "
+        "execute_scene_arrangement_spec when the timeline looks correct."
     ) % (style, sections)
+
+
+@mcp.prompt()
+def arrangement_spec_workflow(style: str = "current set", target_bars: int = 44) -> str:
+    return (
+        "Create an arrangement for %s with about %d bars using a scene arrangement spec. "
+        "Read ableton://scenes and ableton://transport first. Then produce one spec JSON object "
+        "with fields: start_beat, tempo(optional), record, realtime, stop_after, rewind_after, "
+        "focus_view, sections[]. Each section requires scene_index and bars or duration_beats "
+        "(optional label). Validate with preview_scene_arrangement_spec, then execute with "
+        "execute_scene_arrangement_spec."
+    ) % (style, target_bars)
+
+
+@mcp.prompt()
+def token_efficient_arrangement(style: str = "ukg", bpm: int = 138) -> str:
+    return (
+        "Use a compact DSL string instead of long JSON. Example: "
+        "'style=%s; bpm=%d; template=club44; scenes=A,B,C,D; kit=909a; bass=reese2; "
+        "record=true; realtime=true'. Then call parse_arrangement_dsl, "
+        "preview_scene_arrangement_spec, and execute_scene_arrangement_spec."
+    ) % (style, bpm)
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +752,217 @@ def build_arrangement_from_session(ctx: Context, sections: List[Dict[str, Any]])
     Each section accepts: scene_index, bars or duration_beats, optional beat/start_beat, label.
     """
     return _j(_send("build_arrangement_from_session", {"sections": sections}))
+
+
+@mcp.tool()
+@_wrap
+def list_arrangement_presets(ctx: Context) -> str:
+    """List arrangement templates and preset IDs for token-efficient prompting."""
+    return _j(arrangement_presets())
+
+
+@mcp.tool()
+@_wrap
+def parse_arrangement_dsl(ctx: Context, dsl: str, verbosity: str = "compact") -> str:
+    """Convert compact arrangement DSL to normalized spec.
+    Example: style=ukg; bpm=138; template=club44; scenes=A,B,C,D; kit=909a; bass=reese2"""
+    scene_count = int(_send("get_session_info").get("scene_count", 0))
+    transport = _send("get_transport")
+    tempo = float(transport.get("tempo", 120.0))
+    spec = spec_from_dsl(dsl, default_tempo=tempo, scene_count=scene_count)
+    payload = {
+        "dsl": dsl,
+        "spec": spec,
+        "preview": compile_scene_arrangement_spec(spec, default_tempo=tempo),
+    }
+    if verbosity == "compact":
+        payload["preview"] = compact_plan(payload["preview"])
+    return _j(payload)
+
+
+@mcp.tool()
+@_wrap
+def save_arrangement_plan(ctx: Context, slot: str, spec: Dict[str, Any]) -> str:
+    """Save a declarative arrangement spec in server-side memory slots."""
+    plans = _plan_store_load()
+    plans[slot] = spec
+    _plan_store_save(plans)
+    return _j({"saved": True, "slot": slot, "slots": sorted(plans.keys())})
+
+
+@mcp.tool()
+@_wrap
+def load_arrangement_plan(ctx: Context, slot: str, verbosity: str = "compact") -> str:
+    """Load one arrangement spec from server-side memory."""
+    plans = _plan_store_load()
+    if slot not in plans:
+        return _j({"error": "slot not found", "slot": slot, "slots": sorted(plans.keys())})
+    spec = plans[slot]
+    transport = _send("get_transport")
+    default_tempo = float(transport.get("tempo", 120.0))
+    plan = compile_scene_arrangement_spec(spec, default_tempo=default_tempo)
+    return _j(_compact_view({"slot": slot, "spec": spec, "plan": plan}, verbosity=verbosity))
+
+
+@mcp.tool()
+@_wrap
+def patch_arrangement_plan(ctx: Context, slot: str, patch: Union[str, Dict[str, Any]],
+                           verbosity: str = "compact") -> str:
+    """Patch a saved arrangement plan.
+    Text patches support: 'section[2].bars=8' or 'swap scene A->C'."""
+    plans = _plan_store_load()
+    if slot not in plans:
+        return _j({"error": "slot not found", "slot": slot, "slots": sorted(plans.keys())})
+    current_spec = plans[slot]
+    session_info = _send("get_session_info")
+    scene_count = int(session_info.get("scene_count", 0))
+    patch_obj = parse_patch_text(patch, scene_count=scene_count) if isinstance(patch, str) else patch
+    updated_spec = apply_spec_patch(current_spec, patch_obj)
+    plans[slot] = updated_spec
+    _plan_store_save(plans)
+    transport = _send("get_transport")
+    default_tempo = float(transport.get("tempo", 120.0))
+    plan = compile_scene_arrangement_spec(updated_spec, default_tempo=default_tempo)
+    return _j(_compact_view({
+        "slot": slot,
+        "patch": patch_obj,
+        "spec": updated_spec,
+        "plan": plan,
+    }, verbosity=verbosity))
+
+
+def _execute_scene_spec(spec: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
+    transport = _send("get_transport")
+    default_tempo = float(transport.get("tempo", 120.0))
+    plan = compile_scene_arrangement_spec(spec, default_tempo=default_tempo)
+    if dry_run:
+        return {"dry_run": True, "plan": plan}
+
+    focus_view = plan.get("focus_view")
+    if focus_view:
+        _send("focus_view", {"view_name": str(focus_view)})
+
+    if plan["record"]:
+        _send("jump_to_time", {"time": plan["start_beat"]})
+        _send("start_recording")
+        _send("start_playback")
+    elif spec.get("start_playback", False):
+        _send("jump_to_time", {"time": plan["start_beat"]})
+        _send("start_playback")
+
+    log = execute_timed_events(_send, plan["events"], tempo=plan["tempo"], realtime=plan["realtime"])
+
+    if plan["record"]:
+        _send("stop_recording")
+    if plan["stop_after"]:
+        _send("stop_playback")
+    if plan["rewind_after"]:
+        _send("jump_to_time", {"time": plan["start_beat"]})
+
+    after = _send("get_session_info")
+    post = {
+        "is_playing": after.get("is_playing"),
+        "is_recording": after.get("is_recording"),
+        "current_song_time": after.get("current_song_time"),
+        "can_undo": after.get("can_undo"),
+    }
+    return {"dry_run": False, "plan": plan, "events": log, "post_session": post}
+
+
+@mcp.tool()
+@_wrap
+def preview_scene_arrangement_spec(ctx: Context, spec: Dict[str, Any], verbosity: str = "full") -> str:
+    """Validate a declarative scene arrangement spec and return a deterministic timeline (dry-run).
+    spec fields: start_beat, tempo(optional), record, realtime, stop_after, rewind_after,
+    focus_view, sections[]. Each section needs scene_index plus bars or duration_beats."""
+    transport = _send("get_transport")
+    tempo = float(transport.get("tempo", 120.0))
+    plan = compile_scene_arrangement_spec(spec, default_tempo=tempo)
+    return _j(_compact_view({"plan": plan}, verbosity=verbosity))
+
+
+@mcp.tool()
+@_wrap
+def execute_scene_arrangement_spec(ctx: Context, spec: Dict[str, Any], dry_run: bool = False,
+                                   verbosity: str = "full") -> str:
+    """Execute a declarative scene arrangement spec.
+    Set dry_run=True to return timeline only without firing scenes or changing transport."""
+    return _j(_compact_view(_execute_scene_spec(spec, dry_run=dry_run), verbosity=verbosity))
+
+
+def _guess_dsl_from_goal(goal_prompt: str) -> str:
+    text = goal_prompt.lower()
+    if "trap" in text:
+        style = "trap"
+        kit = "trap808"
+        bass = "subclean"
+    elif "house" in text:
+        style = "house"
+        kit = "909a"
+        bass = "reese2"
+    else:
+        style = "ukg"
+        kit = "breaks1"
+        bass = "reese2"
+
+    bar_match = re.search(r"(\d+)\s*bars?", text)
+    bars = int(bar_match.group(1)) if bar_match else 44
+    if bars >= 60:
+        template = "extended64"
+    elif bars <= 34:
+        template = "radio32"
+    else:
+        template = "club44"
+
+    bpm_match = re.search(r"(\d+)\s*bpm", text)
+    bpm = int(bpm_match.group(1)) if bpm_match else 138
+    return (
+        f"style={style}; bpm={bpm}; template={template}; scenes=A,B,C,D; "
+        f"kit={kit}; bass={bass}; record=true; realtime=true"
+    )
+
+
+@mcp.tool()
+@_wrap
+def compose_arrangement(ctx: Context, goal_prompt: str = "club arrangement 44 bars",
+                        dsl: Optional[str] = None, slot: str = "current",
+                        mode: str = "preview", verbosity: str = "compact") -> str:
+    """One-shot orchestrator: compose spec from prompt/DSL, cache it, then preview or execute."""
+    mode = mode.lower().strip()
+    if mode not in {"preview", "execute"}:
+        raise ValueError("mode must be 'preview' or 'execute'")
+
+    selected_dsl = dsl.strip() if dsl and dsl.strip() else _guess_dsl_from_goal(goal_prompt)
+    session_info = _send("get_session_info")
+    scene_count = int(session_info.get("scene_count", 0))
+    transport = _send("get_transport")
+    default_tempo = float(transport.get("tempo", 120.0))
+    spec = spec_from_dsl(selected_dsl, default_tempo=default_tempo, scene_count=scene_count)
+
+    plans = _plan_store_load()
+    plans[slot] = spec
+    _plan_store_save(plans)
+
+    if mode == "preview":
+        plan = compile_scene_arrangement_spec(spec, default_tempo=default_tempo)
+        payload = {
+            "mode": mode,
+            "slot": slot,
+            "dsl": selected_dsl,
+            "spec": spec,
+            "plan": plan,
+        }
+        return _j(_compact_view(payload, verbosity=verbosity))
+
+    execution = _execute_scene_spec(spec, dry_run=False)
+    payload = {
+        "mode": mode,
+        "slot": slot,
+        "dsl": selected_dsl,
+        "spec": spec,
+        **execution,
+    }
+    return _j(_compact_view(payload, verbosity=verbosity))
 
 
 def _resolve_track_reference(event: Dict[str, Any]) -> Dict[str, Any]:

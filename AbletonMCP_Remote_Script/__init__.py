@@ -241,7 +241,9 @@ class AbletonMCP(ControlSurface):
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
                                  "set_track_mute", "load_device_by_name",
-                                 "load_drum_kit"]:
+                                 "load_drum_kit", "set_arrangement_position",
+                                 "set_record_mode", "start_arrangement_recording",
+                                 "stop_arrangement_recording"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -288,6 +290,18 @@ class AbletonMCP(ControlSurface):
                             result = self._start_playback()
                         elif command_type == "stop_playback":
                             result = self._stop_playback()
+                        elif command_type == "set_arrangement_position":
+                            beat = params.get("beat", 0.0)
+                            result = self._set_arrangement_position(beat)
+                        elif command_type == "set_record_mode":
+                            enabled = params.get("enabled", False)
+                            result = self._set_record_mode(enabled)
+                        elif command_type == "start_arrangement_recording":
+                            start_beat = params.get("start_beat", 0.0)
+                            result = self._start_arrangement_recording(start_beat)
+                        elif command_type == "stop_arrangement_recording":
+                            stop_transport = params.get("stop_transport", True)
+                            result = self._stop_arrangement_recording(stop_transport)
                         elif command_type == "load_instrument_or_effect":
                             track_index = params.get("track_index", 0)
                             uri = params.get("uri", "")
@@ -732,6 +746,54 @@ class AbletonMCP(ControlSurface):
             return result
         except Exception as e:
             self.log_message("Error stopping playback: " + str(e))
+            raise
+
+    def _set_arrangement_position(self, beat):
+        """Set the arrangement playback position in beats"""
+        try:
+            self._song.current_song_time = float(beat)
+            return {"current_song_time": self._song.current_song_time}
+        except Exception as e:
+            self.log_message("Error setting arrangement position: " + str(e))
+            raise
+
+    def _set_record_mode(self, enabled):
+        """Set arrangement record mode"""
+        try:
+            self._song.record_mode = bool(enabled)
+            return {"record_mode": self._song.record_mode}
+        except Exception as e:
+            self.log_message("Error setting record mode: " + str(e))
+            raise
+
+    def _start_arrangement_recording(self, start_beat):
+        """Start recording Session launches into Arrangement View"""
+        try:
+            self._song.current_song_time = float(start_beat)
+            self._song.record_mode = True
+            self._song.start_playing()
+            return {
+                "record_mode": self._song.record_mode,
+                "playing": self._song.is_playing,
+                "current_song_time": self._song.current_song_time
+            }
+        except Exception as e:
+            self.log_message("Error starting arrangement recording: " + str(e))
+            raise
+
+    def _stop_arrangement_recording(self, stop_transport=True):
+        """Stop arrangement recording and optionally stop playback"""
+        try:
+            self._song.record_mode = False
+            if stop_transport:
+                self._song.stop_playing()
+            return {
+                "record_mode": self._song.record_mode,
+                "playing": self._song.is_playing,
+                "current_song_time": self._song.current_song_time
+            }
+        except Exception as e:
+            self.log_message("Error stopping arrangement recording: " + str(e))
             raise
     
     def _get_browser_item(self, uri, path):

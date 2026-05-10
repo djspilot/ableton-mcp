@@ -21,6 +21,7 @@ from MCP_Server.music import (
     make_notes,
     vary_notes,
 )
+from MCP_Server.arrangement import execute_timed_events, scene_sequence_to_events
 from MCP_Server.protocol import command_message, decode_message
 from MCP_Server.recipes import STYLE_RECIPES as SHARED_STYLE_RECIPES, recipe_summary
 
@@ -303,6 +304,16 @@ def make_clip_variation(track_index: int, source_clip: int, destination_clip: in
         "Read the source notes first, preserve the original clip, write to the destination "
         "with variation, then verify by reading the destination notes."
     ) % (track_index, source_clip, destination_clip, intensity)
+
+
+@mcp.prompt()
+def record_arrangement_plan(style: str = "current set", sections: str = "intro, verse, build, drop, outro") -> str:
+    return (
+        "Plan an Ableton arrangement recording for %s with sections: %s. First read "
+        "ableton://tracks, ableton://scenes, and ableton://transport. Build a beat-timed "
+        "clip or scene sequence, avoid stop_all_clips unless explicitly requested, then use "
+        "start_arrangement_recording plus perform_clip_sequence or perform_scene_sequence."
+    ) % (style, sections)
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +625,105 @@ def stop_playback(ctx: Context) -> str:
 @_wrap
 def continue_playback(ctx: Context) -> str:
     _send("continue_playback"); return "Resumed playback from current position"
+
+
+@mcp.tool()
+@_wrap
+def set_arrangement_position(ctx: Context, beat: float) -> str:
+    """Move Arrangement playback position to an absolute beat."""
+    return _j(_send("set_arrangement_position", {"beat": beat}))
+
+
+@mcp.tool()
+@_wrap
+def set_record_mode(ctx: Context, enabled: bool) -> str:
+    """Enable or disable Arrangement record mode."""
+    return _j(_send("set_record_mode", {"enabled": enabled}))
+
+
+@mcp.tool()
+@_wrap
+def start_arrangement_recording(ctx: Context, start_beat: float = 0.0) -> str:
+    """Move to start_beat, enable Arrangement record mode, and start playback."""
+    _send("set_arrangement_position", {"beat": start_beat})
+    _send("set_record_mode", {"enabled": True})
+    return _j(_send("start_playback"))
+
+
+@mcp.tool()
+@_wrap
+def stop_arrangement_recording(ctx: Context, stop_transport: bool = True) -> str:
+    """Disable Arrangement record mode and optionally stop transport."""
+    _send("set_record_mode", {"enabled": False})
+    if stop_transport:
+        return _j(_send("stop_playback"))
+    return _j(_send("get_transport"))
+
+
+def _resolve_track_reference(event: Dict[str, Any]) -> Dict[str, Any]:
+    if "track_index" in event:
+        return dict(event)
+    if "track_name" not in event:
+        return dict(event)
+    tracks = _send("list_tracks").get("tracks", [])
+    matches = [track for track in tracks if track.get("name") == event["track_name"]]
+    if not matches:
+        raise ValueError("Track not found: %s" % event["track_name"])
+    resolved = dict(event)
+    resolved["track_index"] = matches[0]["index"]
+    return resolved
+
+
+@mcp.tool()
+@_wrap
+def perform_clip_sequence(ctx: Context, events: List[Dict[str, Any]],
+                          record: bool = False,
+                          start_beat: float = 0.0,
+                          stop_after: bool = False,
+                          realtime: bool = True) -> str:
+    """Perform beat-timed clip/mixer events.
+    Each event: {beat, action, track_index or track_name, clip_index}. Supported actions:
+    fire_clip, stop_clip, set_mixer. Set record=True to record the performance into Arrangement View."""
+    transport = _send("get_transport")
+    tempo = float(transport.get("tempo", 120.0))
+    resolved_events = [_resolve_track_reference(event) for event in events]
+    if record:
+        _send("set_arrangement_position", {"beat": start_beat})
+        _send("set_record_mode", {"enabled": True})
+        _send("start_playback")
+    log = execute_timed_events(_send, resolved_events, tempo=tempo, realtime=realtime)
+    if record:
+        _send("set_record_mode", {"enabled": False})
+    if stop_after:
+        _send("stop_playback")
+    return _j({"tempo": tempo, "recorded": record, "events": log})
+
+
+@mcp.tool()
+@_wrap
+def perform_scene_sequence(ctx: Context, sequence: List[Dict[str, Any]],
+                           record: bool = False,
+                           start_beat: float = 0.0,
+                           stop_after: bool = False,
+                           realtime: bool = True) -> str:
+    """Perform a scene sequence. Each section: {scene_index, bars, label?}.
+    bars controls the wait before the next scene. Set record=True to capture into Arrangement View."""
+    events = scene_sequence_to_events(sequence)
+    if start_beat:
+        for event in events:
+            event["beat"] += start_beat
+    transport = _send("get_transport")
+    tempo = float(transport.get("tempo", 120.0))
+    if record:
+        _send("set_arrangement_position", {"beat": start_beat})
+        _send("set_record_mode", {"enabled": True})
+        _send("start_playback")
+    log = execute_timed_events(_send, events, tempo=tempo, realtime=realtime)
+    if record:
+        _send("set_record_mode", {"enabled": False})
+    if stop_after:
+        _send("stop_playback")
+    return _j({"tempo": tempo, "recorded": record, "events": log})
 
 
 @mcp.tool()

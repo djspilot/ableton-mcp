@@ -183,11 +183,24 @@ In addition to tools, the server exposes MCP resources for context:
 
 Reusable MCP prompts are available for arrangement building, session diagnosis, and clip variation workflows.
 
+### Arrangement Recording
+
+The MCP server includes beat-timed performance helpers:
+
+- `set_arrangement_position(beat)`
+- `set_record_mode(enabled)`
+- `start_arrangement_recording(start_beat)`
+- `stop_arrangement_recording(stop_transport)`
+- `perform_clip_sequence(events, record, realtime)`
+- `perform_scene_sequence(sequence, record, realtime)`
+
+These tools are intended to perform Session View clips/scenes into Arrangement View. Real recording requires the updated Ableton Remote Script to be loaded in Live. Use `realtime=false` only for dry-run dispatch tests.
+
 ### Development And Tests
 
 ```bash
 uv run pytest
-uv run python -m py_compile MCP_Server/server.py MCP_Server/protocol.py MCP_Server/music.py MCP_Server/recipes.py AbletonMCP_Remote_Script/__init__.py
+uv run python -m py_compile MCP_Server/server.py MCP_Server/protocol.py MCP_Server/music.py MCP_Server/recipes.py MCP_Server/arrangement.py AbletonMCP_Remote_Script/__init__.py
 ```
 
 ### Limitations & Security Considerations

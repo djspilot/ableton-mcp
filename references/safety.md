@@ -10,8 +10,22 @@ These tools can remove or overwrite session content:
 - `clear_clip_envelope`
 - `create_clip(..., overwrite=True)`
 - `add_notes_to_clip(..., mode="replace")`
+- `perform_clip_sequence(..., record=True)`
+- `perform_scene_sequence(..., record=True)`
 
 Before using them, state the exact target and why it is needed. Prefer duplicating or writing to a new slot when possible.
+
+## Global Playback Tools
+
+These affect the whole set and need explicit intent:
+
+- `start_playback`
+- `stop_playback`
+- `stop_all_clips`
+- `start_arrangement_recording`
+- `stop_arrangement_recording`
+- `perform_clip_sequence`
+- `perform_scene_sequence`
 
 ## Local Server Security
 

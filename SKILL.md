@@ -32,12 +32,14 @@ Prompts:
 - `build_arrangement(style, scenes)`
 - `diagnose_session(goal)`
 - `make_clip_variation(track_index, source_clip, destination_clip, intensity)`
+- `record_arrangement_plan(style, sections)`
 
 Core tools:
 - Read: `get_session_info`, `list_tracks`, `get_track_info`, `get_clip_notes`, `get_transport`, `list_scenes`
 - Write: `create_midi_track`, `create_audio_track`, `create_clip`, `add_notes_to_clip`, `set_mixer`, `set_clip_loop`
 - Devices: `get_browser_tree`, `get_browser_items_at_path`, `load_browser_item`, `load_device_by_name`, `set_device_parameter`
 - Music: `make_pattern`, `variation`, `harmonize`, `style_recipe`, `list_style_recipes`
+- Arrangement: `set_arrangement_position`, `set_record_mode`, `start_arrangement_recording`, `stop_arrangement_recording`, `perform_clip_sequence`, `perform_scene_sequence`
 
 ## Workflows
 

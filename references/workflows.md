@@ -13,6 +13,18 @@
 6. Write one clip at a time with `make_pattern`.
 7. Verify clip contents with `get_clip_notes` or track structure with `get_track_info`.
 
+## Record An Arrangement Performance
+
+1. Read `ableton://tracks`, `ableton://scenes`, and `ableton://transport`.
+2. Build a beat-timed plan using track names or scene indices.
+3. Prefer scene sequences when the grid is already coherent:
+   - `perform_scene_sequence(sequence=[{"scene_index": 0, "bars": 8}, ...], record=True)`
+4. Use clip sequences for finer control:
+   - `perform_clip_sequence(events=[{"beat": 0, "action": "fire_clip", "track_name": "GEMINI TEST", "clip_index": 0}], record=True)`
+5. Use `realtime=False` only for dry-run dispatch tests. Real recording needs `realtime=True`.
+6. Do not call `stop_all_clips` as part of arrangement recording unless the user explicitly asks.
+7. After recording, call `stop_arrangement_recording`, then read `ableton://transport`.
+
 ## Edit Existing Material
 
 1. Read `get_clip_notes`.

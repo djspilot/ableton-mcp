@@ -157,16 +157,45 @@ Here are some examples of what you can ask Claude to do:
 
 ### Communication Protocol
 
-The system uses a simple JSON-based protocol over TCP sockets:
+The system uses newline-delimited JSON over a localhost TCP socket:
 
 - Commands are sent as JSON objects with a `type` and optional `params`
 - Responses are JSON objects with a `status` and `result` or `message`
+- Each command and response is terminated with `\n`, which makes framing reliable for large responses
+
+The MCP server connects to `127.0.0.1:9877` by default. Override this for development with:
+
+```bash
+ABLETON_MCP_HOST=127.0.0.1 ABLETON_MCP_PORT=9877 uvx ableton-mcp
+```
+
+### MCP Resources And Prompts
+
+In addition to tools, the server exposes MCP resources for context:
+
+- `ableton://session`
+- `ableton://tracks`
+- `ableton://transport`
+- `ableton://scenes`
+- `ableton://style-recipes`
+- `ableton://command-log`
+- `ableton://server-status`
+
+Reusable MCP prompts are available for arrangement building, session diagnosis, and clip variation workflows.
+
+### Development And Tests
+
+```bash
+uv run pytest
+uv run python -m py_compile MCP_Server/server.py MCP_Server/protocol.py MCP_Server/music.py MCP_Server/recipes.py AbletonMCP_Remote_Script/__init__.py
+```
 
 ### Limitations & Security Considerations
 
 - Creating complex musical arrangements might need to be broken down into smaller steps
 - The tool is designed to work with Ableton's default devices and browser items
 - Always save your work before extensive experimentation
+- Keep the Remote Script socket bound to localhost unless you are intentionally developing a trusted remote setup
 
 ## Contributing
 

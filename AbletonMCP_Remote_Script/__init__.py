@@ -155,26 +155,24 @@ class AbletonMCP(ControlSurface):
                         # Python 2: data is already string
                         buffer += data
                     
-                    try:
-                        # Try to parse command from buffer
-                        command = json.loads(buffer)  # Removed decode('utf-8')
-                        buffer = ''  # Clear buffer after successful parse
-                        
+                    while True:
+                        command = None
+                        if '\n' in buffer:
+                            line, buffer = buffer.split('\n', 1)
+                            if not line.strip():
+                                continue
+                            command = json.loads(line)
+                        else:
+                            try:
+                                # Backward compatibility for older clients that send one raw JSON object.
+                                command = json.loads(buffer)
+                                buffer = ''
+                            except ValueError:
+                                break
+
                         self.log_message("Received command: " + str(command.get("type", "unknown")))
-                        
-                        # Process the command and get response
                         response = self._process_command(command)
-                        
-                        # Send the response with explicit encoding
-                        try:
-                            # Python 3: encode string to bytes
-                            client.sendall(json.dumps(response).encode('utf-8'))
-                        except AttributeError:
-                            # Python 2: string is already bytes
-                            client.sendall(json.dumps(response))
-                    except ValueError:
-                        # Incomplete data, wait for more
-                        continue
+                        self._send_response(client, response)
                         
                 except Exception as e:
                     self.log_message("Error handling client data: " + str(e))
@@ -186,11 +184,7 @@ class AbletonMCP(ControlSurface):
                         "message": str(e)
                     }
                     try:
-                        # Python 3: encode string to bytes
-                        client.sendall(json.dumps(error_response).encode('utf-8'))
-                    except AttributeError:
-                        # Python 2: string is already bytes
-                        client.sendall(json.dumps(error_response))
+                        self._send_response(client, error_response)
                     except:
                         # If we can't send the error, the connection is probably dead
                         break
@@ -206,6 +200,14 @@ class AbletonMCP(ControlSurface):
             except:
                 pass
             self.log_message("Client handler stopped")
+
+    def _send_response(self, client, response):
+        """Send one newline-delimited JSON response."""
+        payload = json.dumps(response) + "\n"
+        try:
+            client.sendall(payload.encode('utf-8'))
+        except AttributeError:
+            client.sendall(payload)
     
     def _process_command(self, command):
         """Process a command from the client and return a response"""
@@ -220,16 +222,26 @@ class AbletonMCP(ControlSurface):
         
         try:
             # Route the command to the appropriate handler
-            if command_type == "get_session_info":
+            if command_type == "ping":
+                response["result"] = {"ok": True}
+            elif command_type == "get_session_info":
                 response["result"] = self._get_session_info()
+            elif command_type == "list_tracks":
+                response["result"] = self._list_tracks()
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
+            elif command_type == "get_clip_notes":
+                track_index = params.get("track_index", 0)
+                clip_index = params.get("clip_index", 0)
+                response["result"] = self._get_clip_notes(track_index, clip_index)
             # Commands that modify Live's state should be scheduled on the main thread
             elif command_type in ["create_midi_track", "set_track_name", 
                                  "create_clip", "add_notes_to_clip", "set_clip_name", 
                                  "set_tempo", "fire_clip", "stop_clip",
-                                 "start_playback", "stop_playback", "load_browser_item"]:
+                                 "start_playback", "stop_playback", "load_browser_item",
+                                 "set_track_mute", "load_device_by_name",
+                                 "load_drum_kit"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -248,12 +260,14 @@ class AbletonMCP(ControlSurface):
                             track_index = params.get("track_index", 0)
                             clip_index = params.get("clip_index", 0)
                             length = params.get("length", 4.0)
-                            result = self._create_clip(track_index, clip_index, length)
+                            overwrite = params.get("overwrite", False)
+                            result = self._create_clip(track_index, clip_index, length, overwrite)
                         elif command_type == "add_notes_to_clip":
                             track_index = params.get("track_index", 0)
                             clip_index = params.get("clip_index", 0)
                             notes = params.get("notes", [])
-                            result = self._add_notes_to_clip(track_index, clip_index, notes)
+                            mode = params.get("mode", "append")
+                            result = self._add_notes_to_clip(track_index, clip_index, notes, mode)
                         elif command_type == "set_clip_name":
                             track_index = params.get("track_index", 0)
                             clip_index = params.get("clip_index", 0)
@@ -278,12 +292,17 @@ class AbletonMCP(ControlSurface):
                             track_index = params.get("track_index", 0)
                             uri = params.get("uri", "")
                             result = self._load_instrument_or_effect(track_index, uri)
+                        elif command_type == "set_track_mute":
+                            track_index = params.get("track_index", 0)
+                            mute = params.get("mute", False)
+                            result = self._set_track_mute(track_index, mute)
                         elif command_type == "load_browser_item":
                             track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", -1)
                             item_uri = params.get("item_uri", "")
-                            result = self._load_browser_item(track_index, item_uri)
+                            result = self._load_browser_item(track_index, item_uri, clip_index)
                         
-                        # Put the result in the queue
+                        # Put the result in the result queue
                         response_queue.put({"status": "success", "result": result})
                     except Exception as e:
                         self.log_message("Error in main thread task: " + str(e))
@@ -338,6 +357,27 @@ class AbletonMCP(ControlSurface):
         return response
     
     # Command implementations
+
+    def _list_tracks(self):
+        """Get a compact summary of every track."""
+        tracks = []
+        for track_index, track in enumerate(self._song.tracks):
+            clips = []
+            for slot_index, slot in enumerate(track.clip_slots):
+                clips.append({
+                    "index": slot_index,
+                    "has_clip": slot.has_clip,
+                    "name": slot.clip.name if slot.has_clip else None
+                })
+            tracks.append({
+                "index": track_index,
+                "name": track.name,
+                "mute": track.mute,
+                "solo": track.solo,
+                "arm": track.arm,
+                "clips": clips
+            })
+        return {"tracks": tracks}
     
     def _get_session_info(self):
         """Get information about the current session"""
@@ -413,6 +453,32 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error getting track info: " + str(e))
             raise
+
+    def _get_clip_notes(self, track_index, clip_index):
+        """Read MIDI notes from a clip."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+            slot = track.clip_slots[clip_index]
+            if not slot.has_clip:
+                raise Exception("No clip in slot")
+            clip = slot.clip
+            notes = []
+            for note in clip.get_notes(0, 0, 128, clip.length):
+                notes.append({
+                    "pitch": note[0],
+                    "start_time": note[1],
+                    "duration": note[2],
+                    "velocity": note[3],
+                    "mute": note[4]
+                })
+            return {"clip_length": clip.length, "notes": notes}
+        except Exception as e:
+            self.log_message("Error getting clip notes: " + str(e))
+            raise
     
     def _create_midi_track(self, index):
         """Create a new MIDI track at the specified index"""
@@ -434,6 +500,24 @@ class AbletonMCP(ControlSurface):
             raise
     
     
+    def _set_track_mute(self, track_index, mute):
+        """Set the mute state of a track"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            
+            track = self._song.tracks[track_index]
+            track.mute = mute
+            
+            result = {
+                "index": track_index,
+                "mute": track.mute
+            }
+            return result
+        except Exception as e:
+            self.log_message("Error setting track mute: " + str(e))
+            raise
+
     def _set_track_name(self, track_index, name):
         """Set the name of a track"""
         try:
@@ -452,7 +536,7 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error setting track name: " + str(e))
             raise
     
-    def _create_clip(self, track_index, clip_index, length):
+    def _create_clip(self, track_index, clip_index, length, overwrite=False):
         """Create a new MIDI clip in the specified track and clip slot"""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
@@ -467,21 +551,28 @@ class AbletonMCP(ControlSurface):
             
             # Check if the clip slot already has a clip
             if clip_slot.has_clip:
-                raise Exception("Clip slot already has a clip")
+                if not overwrite:
+                    return {
+                        "name": clip_slot.clip.name,
+                        "length": clip_slot.clip.length,
+                        "existed": True
+                    }
+                clip_slot.delete_clip()
             
             # Create the clip
             clip_slot.create_clip(length)
             
             result = {
                 "name": clip_slot.clip.name,
-                "length": clip_slot.clip.length
+                "length": clip_slot.clip.length,
+                "existed": False
             }
             return result
         except Exception as e:
             self.log_message("Error creating clip: " + str(e))
             raise
     
-    def _add_notes_to_clip(self, track_index, clip_index, notes):
+    def _add_notes_to_clip(self, track_index, clip_index, notes, mode="append"):
         """Add MIDI notes to a clip"""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
@@ -498,9 +589,13 @@ class AbletonMCP(ControlSurface):
                 raise Exception("No clip in slot")
             
             clip = clip_slot.clip
+
+            existing_notes = []
+            if mode != "replace":
+                existing_notes = list(clip.get_notes(0, 0, 128, clip.length))
             
             # Convert note data to Live's format
-            live_notes = []
+            live_notes = existing_notes
             for note in notes:
                 pitch = note.get("pitch", 60)
                 start_time = note.get("start_time", 0.0)
@@ -514,7 +609,9 @@ class AbletonMCP(ControlSurface):
             clip.set_notes(tuple(live_notes))
             
             result = {
-                "note_count": len(notes)
+                "note_count": len(live_notes),
+                "added": len(notes),
+                "mode": mode
             }
             return result
         except Exception as e:
@@ -723,15 +820,15 @@ class AbletonMCP(ControlSurface):
     
     
     
-    def _load_browser_item(self, track_index, item_uri):
-        """Load a browser item onto a track by its URI"""
+    def _load_browser_item(self, track_index, item_uri, clip_index=-1):
+        """Load a browser item onto a track or clip slot by its URI"""
         try:
             if track_index < 0 or track_index >= len(self._song.tracks):
                 raise IndexError("Track index out of range")
             
             track = self._song.tracks[track_index]
             
-            # Access the application's browser instance instead of creating a new one
+            # Access the application's browser instance
             app = self.application()
             
             # Find the browser item by URI
@@ -743,6 +840,10 @@ class AbletonMCP(ControlSurface):
             # Select the track
             self._song.view.selected_track = track
             
+            # Select the clip slot if provided
+            if clip_index >= 0 and clip_index < len(track.clip_slots):
+                self._song.view.highlighted_clip_slot = track.clip_slots[clip_index]
+            
             # Load the item
             app.browser.load_item(item)
             
@@ -750,6 +851,7 @@ class AbletonMCP(ControlSurface):
                 "loaded": True,
                 "item_name": item.name,
                 "track_name": track.name,
+                "clip_index": clip_index,
                 "uri": item_uri
             }
             return result
@@ -758,8 +860,8 @@ class AbletonMCP(ControlSurface):
             self.log_message(traceback.format_exc())
             raise
     
-    def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=10, current_depth=0):
-        """Find a browser item by its URI"""
+    def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=20, current_depth=0):
+        """Find a browser item by its URI (increased depth for samples)"""
         try:
             # Check if this is the item we're looking for
             if hasattr(browser_or_item, 'uri') and browser_or_item.uri == uri:
@@ -771,14 +873,11 @@ class AbletonMCP(ControlSurface):
             
             # Check if this is a browser with root categories
             if hasattr(browser_or_item, 'instruments'):
-                # Check all main categories
-                categories = [
-                    browser_or_item.instruments,
-                    browser_or_item.sounds,
-                    browser_or_item.drums,
-                    browser_or_item.audio_effects,
-                    browser_or_item.midi_effects
-                ]
+                # Explicit list of all categories to search
+                categories = []
+                for attr in ['instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects', 'samples', 'packs', 'user_library']:
+                    if hasattr(browser_or_item, attr):
+                        categories.append(getattr(browser_or_item, attr))
                 
                 for category in categories:
                     item = self._find_browser_item_by_uri(category, uri, max_depth, current_depth + 1)

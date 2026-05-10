@@ -243,7 +243,8 @@ class AbletonMCP(ControlSurface):
                                  "set_track_mute", "load_device_by_name",
                                  "load_drum_kit", "set_arrangement_position",
                                  "set_record_mode", "start_arrangement_recording",
-                                 "stop_arrangement_recording"]:
+                                 "stop_arrangement_recording", "start_recording",
+                                 "stop_recording", "jump_to_time"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -293,9 +294,16 @@ class AbletonMCP(ControlSurface):
                         elif command_type == "set_arrangement_position":
                             beat = params.get("beat", 0.0)
                             result = self._set_arrangement_position(beat)
+                        elif command_type == "jump_to_time":
+                            beat = params.get("time", 0.0)
+                            result = self._set_arrangement_position(beat)
                         elif command_type == "set_record_mode":
                             enabled = params.get("enabled", False)
                             result = self._set_record_mode(enabled)
+                        elif command_type == "start_recording":
+                            result = self._set_record_mode(True)
+                        elif command_type == "stop_recording":
+                            result = self._set_record_mode(False)
                         elif command_type == "start_arrangement_recording":
                             start_beat = params.get("start_beat", 0.0)
                             result = self._start_arrangement_recording(start_beat)

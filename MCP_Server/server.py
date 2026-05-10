@@ -631,22 +631,23 @@ def continue_playback(ctx: Context) -> str:
 @_wrap
 def set_arrangement_position(ctx: Context, beat: float) -> str:
     """Move Arrangement playback position to an absolute beat."""
-    return _j(_send("set_arrangement_position", {"beat": beat}))
+    return _j(_send("jump_to_time", {"time": beat}))
 
 
 @mcp.tool()
 @_wrap
 def set_record_mode(ctx: Context, enabled: bool) -> str:
     """Enable or disable Arrangement record mode."""
-    return _j(_send("set_record_mode", {"enabled": enabled}))
+    command = "start_recording" if enabled else "stop_recording"
+    return _j(_send(command))
 
 
 @mcp.tool()
 @_wrap
 def start_arrangement_recording(ctx: Context, start_beat: float = 0.0) -> str:
     """Move to start_beat, enable Arrangement record mode, and start playback."""
-    _send("set_arrangement_position", {"beat": start_beat})
-    _send("set_record_mode", {"enabled": True})
+    _send("jump_to_time", {"time": start_beat})
+    _send("start_recording")
     return _j(_send("start_playback"))
 
 
@@ -654,7 +655,7 @@ def start_arrangement_recording(ctx: Context, start_beat: float = 0.0) -> str:
 @_wrap
 def stop_arrangement_recording(ctx: Context, stop_transport: bool = True) -> str:
     """Disable Arrangement record mode and optionally stop transport."""
-    _send("set_record_mode", {"enabled": False})
+    _send("stop_recording")
     if stop_transport:
         return _j(_send("stop_playback"))
     return _j(_send("get_transport"))
@@ -688,12 +689,12 @@ def perform_clip_sequence(ctx: Context, events: List[Dict[str, Any]],
     tempo = float(transport.get("tempo", 120.0))
     resolved_events = [_resolve_track_reference(event) for event in events]
     if record:
-        _send("set_arrangement_position", {"beat": start_beat})
-        _send("set_record_mode", {"enabled": True})
+        _send("jump_to_time", {"time": start_beat})
+        _send("start_recording")
         _send("start_playback")
     log = execute_timed_events(_send, resolved_events, tempo=tempo, realtime=realtime)
     if record:
-        _send("set_record_mode", {"enabled": False})
+        _send("stop_recording")
     if stop_after:
         _send("stop_playback")
     return _j({"tempo": tempo, "recorded": record, "events": log})
@@ -715,12 +716,12 @@ def perform_scene_sequence(ctx: Context, sequence: List[Dict[str, Any]],
     transport = _send("get_transport")
     tempo = float(transport.get("tempo", 120.0))
     if record:
-        _send("set_arrangement_position", {"beat": start_beat})
-        _send("set_record_mode", {"enabled": True})
+        _send("jump_to_time", {"time": start_beat})
+        _send("start_recording")
         _send("start_playback")
     log = execute_timed_events(_send, events, tempo=tempo, realtime=realtime)
     if record:
-        _send("set_record_mode", {"enabled": False})
+        _send("stop_recording")
     if stop_after:
         _send("stop_playback")
     return _j({"tempo": tempo, "recorded": record, "events": log})

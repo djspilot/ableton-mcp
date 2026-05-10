@@ -837,7 +837,7 @@ class AbletonMCP(ControlSurface):
                     "created": False,
                     "reason": "empty clip slot"
                 }
-            clip_slot.duplicate_clip_to_arrangement(float(beat))
+            self._song.duplicate_clip_to_arrangement(clip_slot.clip, float(beat))
             return {
                 "track_index": track_index,
                 "clip_index": clip_index,
@@ -874,7 +874,7 @@ class AbletonMCP(ControlSurface):
                         offsets.append(offset)
                         offset += clip_length
                 for offset in offsets:
-                    clip_slot.duplicate_clip_to_arrangement(beat + offset)
+                    self._song.duplicate_clip_to_arrangement(clip_slot.clip, beat + offset)
                     copied.append({
                         "track_index": track_index,
                         "track_name": track.name,

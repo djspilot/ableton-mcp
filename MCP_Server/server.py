@@ -661,6 +661,40 @@ def stop_arrangement_recording(ctx: Context, stop_transport: bool = True) -> str
     return _j(_send("get_transport"))
 
 
+@mcp.tool()
+@_wrap
+def duplicate_clip_to_arrangement(ctx: Context, track_index: int, clip_index: int,
+                                  beat: float) -> str:
+    """Copy one Session View clip slot into Arrangement View at an absolute beat."""
+    return _j(_send("duplicate_clip_to_arrangement", {
+        "track_index": track_index,
+        "clip_index": clip_index,
+        "beat": beat,
+    }))
+
+
+@mcp.tool()
+@_wrap
+def duplicate_scene_to_arrangement(ctx: Context, scene_index: int, beat: float,
+                                   duration_beats: Optional[float] = None) -> str:
+    """Copy all clips in one Session scene into Arrangement View.
+    duration_beats repeats shorter clips until the section is filled.
+    """
+    params: Dict[str, Any] = {"scene_index": scene_index, "beat": beat}
+    if duration_beats is not None:
+        params["duration_beats"] = duration_beats
+    return _j(_send("duplicate_scene_to_arrangement", params))
+
+
+@mcp.tool()
+@_wrap
+def build_arrangement_from_session(ctx: Context, sections: List[Dict[str, Any]]) -> str:
+    """Build an Arrangement View song from Session scenes.
+    Each section accepts: scene_index, bars or duration_beats, optional beat/start_beat, label.
+    """
+    return _j(_send("build_arrangement_from_session", {"sections": sections}))
+
+
 def _resolve_track_reference(event: Dict[str, Any]) -> Dict[str, Any]:
     if "track_index" in event:
         return dict(event)

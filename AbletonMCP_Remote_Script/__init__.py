@@ -240,11 +240,14 @@ class AbletonMCP(ControlSurface):
                                  "create_clip", "add_notes_to_clip", "set_clip_name", 
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
-                                 "set_track_mute", "load_device_by_name",
-                                 "load_drum_kit", "set_arrangement_position",
-                                 "set_record_mode", "start_arrangement_recording",
-                                 "stop_arrangement_recording", "start_recording",
-                                 "stop_recording", "jump_to_time"]:
+                                     "set_track_mute", "load_device_by_name",
+                                     "load_drum_kit", "set_arrangement_position",
+                                     "set_record_mode", "start_arrangement_recording",
+                                     "stop_arrangement_recording", "start_recording",
+                                     "stop_recording", "jump_to_time",
+                                     "duplicate_clip_to_arrangement",
+                                     "duplicate_scene_to_arrangement",
+                                     "build_arrangement_from_session"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -310,6 +313,19 @@ class AbletonMCP(ControlSurface):
                         elif command_type == "stop_arrangement_recording":
                             stop_transport = params.get("stop_transport", True)
                             result = self._stop_arrangement_recording(stop_transport)
+                        elif command_type == "duplicate_clip_to_arrangement":
+                            track_index = params.get("track_index", 0)
+                            clip_index = params.get("clip_index", 0)
+                            beat = params.get("beat", 0.0)
+                            result = self._duplicate_clip_to_arrangement(track_index, clip_index, beat)
+                        elif command_type == "duplicate_scene_to_arrangement":
+                            scene_index = params.get("scene_index", 0)
+                            beat = params.get("beat", 0.0)
+                            duration_beats = params.get("duration_beats", None)
+                            result = self._duplicate_scene_to_arrangement(scene_index, beat, duration_beats)
+                        elif command_type == "build_arrangement_from_session":
+                            sections = params.get("sections", [])
+                            result = self._build_arrangement_from_session(sections)
                         elif command_type == "load_instrument_or_effect":
                             track_index = params.get("track_index", 0)
                             uri = params.get("uri", "")
@@ -802,6 +818,110 @@ class AbletonMCP(ControlSurface):
             }
         except Exception as e:
             self.log_message("Error stopping arrangement recording: " + str(e))
+            raise
+
+    def _duplicate_clip_to_arrangement(self, track_index, clip_index, beat):
+        """Copy one Session clip slot to Arrangement View at an absolute beat."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+            clip_slot = track.clip_slots[clip_index]
+            if not clip_slot.has_clip:
+                return {
+                    "track_index": track_index,
+                    "clip_index": clip_index,
+                    "beat": float(beat),
+                    "created": False,
+                    "reason": "empty clip slot"
+                }
+            clip_slot.duplicate_clip_to_arrangement(float(beat))
+            return {
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "track_name": track.name,
+                "clip_name": clip_slot.clip.name,
+                "beat": float(beat),
+                "created": True
+            }
+        except Exception as e:
+            self.log_message("Error duplicating clip to arrangement: " + str(e))
+            raise
+
+    def _duplicate_scene_to_arrangement(self, scene_index, beat, duration_beats=None):
+        """Copy all clips in a Session scene to Arrangement View."""
+        try:
+            if scene_index < 0 or scene_index >= len(self._song.scenes):
+                raise IndexError("Scene index out of range")
+            beat = float(beat)
+            duration = None if duration_beats is None else float(duration_beats)
+            copied = []
+            for track_index, track in enumerate(self._song.tracks):
+                if scene_index >= len(track.clip_slots):
+                    continue
+                clip_slot = track.clip_slots[scene_index]
+                if not clip_slot.has_clip:
+                    continue
+                clip_length = float(clip_slot.clip.length)
+                if duration is None or clip_length <= 0:
+                    offsets = [0.0]
+                else:
+                    offsets = []
+                    offset = 0.0
+                    while offset < duration:
+                        offsets.append(offset)
+                        offset += clip_length
+                for offset in offsets:
+                    clip_slot.duplicate_clip_to_arrangement(beat + offset)
+                    copied.append({
+                        "track_index": track_index,
+                        "track_name": track.name,
+                        "clip_index": scene_index,
+                        "clip_name": clip_slot.clip.name,
+                        "beat": beat + offset
+                    })
+            return {
+                "scene_index": scene_index,
+                "scene_name": self._song.scenes[scene_index].name,
+                "beat": beat,
+                "duration_beats": duration,
+                "copied_count": len(copied),
+                "clips": copied
+            }
+        except Exception as e:
+            self.log_message("Error duplicating scene to arrangement: " + str(e))
+            raise
+
+    def _build_arrangement_from_session(self, sections):
+        """Build an Arrangement View song from Session scenes.
+        Each section accepts scene_index, beat or start_beat, and bars or duration_beats.
+        """
+        try:
+            copied_sections = []
+            current_beat = 0.0
+            for section in sections:
+                scene_index = section.get("scene_index", 0)
+                if "beat" in section:
+                    current_beat = float(section.get("beat", 0.0))
+                elif "start_beat" in section:
+                    current_beat = float(section.get("start_beat", 0.0))
+                if "duration_beats" in section:
+                    duration = float(section.get("duration_beats", 0.0))
+                else:
+                    duration = float(section.get("bars", 4)) * 4.0
+                result = self._duplicate_scene_to_arrangement(scene_index, current_beat, duration)
+                result["label"] = section.get("label", "")
+                copied_sections.append(result)
+                current_beat += duration
+            return {
+                "section_count": len(copied_sections),
+                "end_beat": current_beat,
+                "sections": copied_sections
+            }
+        except Exception as e:
+            self.log_message("Error building arrangement from session: " + str(e))
             raise
     
     def _get_browser_item(self, uri, path):
